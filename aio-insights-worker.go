@@ -4,10 +4,24 @@ package main
  * Imports, yo
  */
 import (
+	"bytes"
+	"flag"
 	"fmt"
+	"github.com/rakyll/globalconf"
 	"github.com/streadway/amqp"
 	"log"
 	"net/http"
+)
+
+// Set up our allowed flags
+var (
+	amqp_hostname       = flag.String("amqp_hostname", "localhost", "The host address of the AMQP server you wish to listen to")
+	amqp_hostport       = flag.String("amqp_hostport", "5672", "The host port of the AMQP server you wish to listen to")
+	amqp_username       = flag.String("amqp_username", "guest", "The username you wish to auth to AMQP with")
+	amqp_password       = flag.String("amqp_password", "guest", "The password you wish to auth to AMQP with")
+	source_ampq_queue   = flag.String("aio_queue", "", "The source queue we are listening on")
+	newrelic_account_id = flag.String("newrelic_account_id", "", "Your NewRelic account ID")
+	newrelic_insert_key = flag.String("newrelic_insert_key", "", "Your NewRelic API key")
 )
 
 /**
@@ -21,16 +35,33 @@ func failOnError(err error, msg string) {
 }
 
 /**
+ * Send the given string payload to NewRelic
+ */
+func sendToInsights(payload []byte) {
+	var url = fmt.Sprintf("https://insights-collector.newrelic.com/v1/accounts/%s/events", *newrelic_account_id)
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(payload))
+	req.Header.Set("X-Insert-Key", *newrelic_insert_key)
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	// Do you want to die on failure?
+	failOnError(err, "Error sending to NewRelic")
+	defer resp.Body.Close()
+}
+
+/**
  * Main func.  Establish amqp connection, listen for messages, send to insights
  */
 func main() {
-	var AMQP_HOSTNAME string = "localhost-reactor.redventures.net"
-	var AMQP_HOSTPORT string = "5672"
-	var AMQP_USERNAME string = "guest"
-	var AMQP_PASSWORD string = "guest"
-	var AIO_QUEUE_NAME string = "aio-queue"
+	// Spin up globalconf, overwriting flags where applicable
+	conf, err := globalconf.New("myapp")
+	failOnError(err, "Failed to load application configuration!")
+	conf.ParseAll()
+	flag.Parse()
 
-	conn, err := amqp.Dial(fmt.Sprintf("amqp://%s:%s@%s:%s/", AMQP_USERNAME, AMQP_PASSWORD, AMQP_HOSTNAME, AMQP_HOSTPORT))
+	conn, err := amqp.Dial(fmt.Sprintf("amqp://%s:%s@%s:%s/", *amqp_username, *amqp_password, *amqp_hostname, *amqp_hostport))
 	failOnError(err, "Failed to connect to RabbitMQ")
 	defer conn.Close()
 
@@ -39,12 +70,12 @@ func main() {
 	defer ch.Close()
 
 	q, err := ch.QueueDeclare(
-		AIO_QUEUE_NAME, // name
-		false,          // durable
-		false,          // delete when usused
-		false,          // exclusive
-		false,          // no-wait
-		nil,            // arguments
+		*source_ampq_queue, // name
+		false,              // durable
+		false,              // delete when usused
+		false,              // exclusive
+		false,              // no-wait
+		nil,                // arguments
 	)
 	failOnError(err, "Failed to declare a queue")
 
@@ -63,7 +94,8 @@ func main() {
 
 	go func() {
 		for d := range msgs {
-			log.Printf("Received a message: %s", d.Body)
+			log.Printf("Msg: %s", d.Body)
+			sendToInsights(d.Body)
 		}
 	}()
 
